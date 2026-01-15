@@ -60,7 +60,7 @@ def init_db():
     # Seed Initial Data
     c.execute('SELECT count(*) FROM departments')
     if c.fetchone()[0] == 0:
-        depts = [("Engineering",), ("HR",), ("Sales",), ("Marketing",), ("Operations",)]
+        depts = [("Documentation",), ("Logistics",), ("Sales",), ("Marketing",), ("Operations",)]
         c.executemany('INSERT INTO departments VALUES (?)', depts)
         
     c.execute('SELECT count(*) FROM statuses')
