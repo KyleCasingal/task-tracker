@@ -241,16 +241,25 @@ def main():
         current_tab = st.tabs(tabs)
 
         with current_tab[0]:
-            # Filter Data specifically for the Dashboard
-            # If Employee -> Show ONLY their data
-            # If Manager -> Show ALL data (Manager sees big picture)
             dash_df = df
             if st.session_state['role'] == "Employee":
                 dash_df = df[df['assignee'] == st.session_state['username']]
 
             if not dash_df.empty:
                 render_metrics(dash_df)
-                c1, c2 = st.columns(2); c1.bar_chart(dash_df['department'].value_counts()); c2.bar_chart(dash_df['status'].value_counts())
+                
+                # --- UPDATED: 3 Charts logic ---
+                c1, c2, c3 = st.columns(3) # Changed from 2 to 3 columns
+                
+                c1.subheader("By Dept")
+                c1.bar_chart(dash_df['department'].value_counts())
+                
+                c2.subheader("By Status")
+                c2.bar_chart(dash_df['status'].value_counts())
+                
+                c3.subheader("By Employee")
+                c3.bar_chart(dash_df['assignee'].value_counts())
+                
                 st.markdown("### 📄 List")
                 lim = st.selectbox("Show:", [10, 20, 50, "All"])
                 d_df = dash_df.head(int(lim)) if lim != "All" else dash_df
@@ -260,8 +269,6 @@ def main():
         # --- WORKSPACE ---
         with current_tab[1]:
             st.header("Active Tasks")
-            # If Employee -> Workspace is filtered to them
-            # If Manager -> Workspace shows ALL active tasks (so they can manage them)
             work_df = df
             if st.session_state['role'] == "Employee":
                 work_df = df[df['assignee'] == st.session_state['username']]
@@ -277,7 +284,6 @@ def main():
                                 st.subheader(row['task_name'])
                                 st.caption(f"📅 Due: {row['deadline']}")
                                 
-                                # --- NEW LOGIC: SHOW ASSIGNEE FOR MANAGERS ---
                                 if st.session_state['role'] == "Manager":
                                     st.markdown(f"**👤 Assigned to:** `{row['assignee']}`")
                                 
