@@ -335,12 +335,12 @@ def main():
                 ac1, ac2, ac3 = st.columns(3)
                 with ac1:
                     st.subheader("Depts"); new_d = st.text_input("Add Dept")
-                    if st.button("Add D"): add_item('departments', new_d); st.rerun()
+                    if st.button("Add Department"): add_item('departments', new_d); st.rerun()
                     for d in dept_list: 
                         if st.button(f"🗑️ {d}", key=f"dd_{d}"): delete_item('departments', d); st.rerun()
                 with ac2:
                     st.subheader("Statuses"); new_s = st.text_input("Add Status")
-                    if st.button("Add S"): add_item('statuses', new_s); st.rerun()
+                    if st.button("Add Status"): add_item('statuses', new_s); st.rerun()
                     for s in status_list:
                         if st.button(f"🗑️ {s}", key=f"ds_{s}"): delete_item('statuses', s); st.rerun()
                 with ac3:
