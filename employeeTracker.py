@@ -15,9 +15,13 @@ if not os.path.exists(UPLOAD_DIR):
 
 # --- DATABASE CONNECTION ---
 def get_db_connection():
-    """Establishes connection to Supabase/Postgres using secrets"""
     try:
-        return psycopg2.connect(st.secrets["DB_URL"])
+        # We assume st.secrets["DB_URL"] contains the string
+        return psycopg2.connect(
+            st.secrets["DB_URL"], 
+            connect_timeout=10,  # Fail fast if network is bad
+            sslmode='require'    # Force SSL
+        )
     except Exception as e:
         st.error(f"❌ Database Connection Error: {e}")
         st.stop()
