@@ -184,7 +184,7 @@ def display_attachment_preview(file_path, link_url):
 
 # --- MAIN APP ---
 def main():
-    st.set_page_config(page_title="Task Tracker Pro", layout="wide", page_icon="🔐")
+    st.set_page_config(page_title="Lynx Task Tracker", layout="wide", page_icon="🔐")
     init_db()
 
     if 'logged_in' not in st.session_state:
