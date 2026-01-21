@@ -4,29 +4,21 @@ import psycopg2
 from datetime import datetime, date, timedelta
 import os
 import hashlib
+import time  # Added for visual delay effects
 from streamlit import cache_data
 
 # --- CONFIGURATION & SETUP ---
-# NOTE: Files uploaded to 'uploads' on Streamlit Cloud are temporary and will vanish on reboot.
-# For permanent files, use the "External Link" feature or integrate AWS S3.
 UPLOAD_DIR = "uploads"
-
 if not os.path.exists(UPLOAD_DIR):
     os.makedirs(UPLOAD_DIR)
 
 # --- DATABASE CONNECTION ---
 def get_db_connection():
-    """Establishes connection to Supabase/Postgres"""
     try:
-        # 1. Try to get URL from the Computer's Environment (Render/Docker)
         db_url = os.getenv("DB_URL")
-        
-        # 2. If not found, try getting from Streamlit Secrets (Local Testing)
         if not db_url:
             db_url = st.secrets["DB_URL"]
-            
         return psycopg2.connect(db_url)
-        
     except Exception as e:
         st.error(f"❌ Database Connection Error: {e}")
         st.stop()
@@ -40,7 +32,6 @@ def check_hashes(password, hashed_text):
         return hashed_text
     return False
 
-
 # --- CACHE DATA ---
 @st.cache_data(ttl=60) 
 def get_tasks(include_archived=False):
@@ -50,14 +41,10 @@ def get_tasks(include_archived=False):
     conn.close()
     return df
 
-
-# --- DATABASE FUNCTIONS (POSTGRES ADAPTED) ---
+# --- DATABASE FUNCTIONS ---
 def init_db():
-    """Initializes tables in PostgreSQL if they don't exist"""
     conn = get_db_connection()
     c = conn.cursor()
-    
-    # 1. Tasks Table (Using SERIAL for Auto-Increment in Postgres)
     c.execute('''CREATE TABLE IF NOT EXISTS tasks (
                     id SERIAL PRIMARY KEY,
                     task_name TEXT,
@@ -71,32 +58,25 @@ def init_db():
                     task_link TEXT,
                     is_archived INTEGER DEFAULT 0
                 )''')
-    
-    # 2. Users Table
     c.execute('''CREATE TABLE IF NOT EXISTS users (
                     username TEXT PRIMARY KEY,
                     password TEXT,
                     role TEXT,
                     last_active TIMESTAMP
                 )''')
-
-    # 3. Reference Tables
     c.execute('''CREATE TABLE IF NOT EXISTS departments (name TEXT PRIMARY KEY)''')
     c.execute('''CREATE TABLE IF NOT EXISTS statuses (name TEXT PRIMARY KEY)''')
-    
     conn.commit()
     
-    # Seed Data (Check if empty first)
+    # Seed Data
     c.execute('SELECT count(*) FROM departments')
     if c.fetchone()[0] == 0:
         depts = [("Engineering",), ("HR",), ("Sales",), ("Marketing",), ("Operations",)]
         c.executemany('INSERT INTO departments VALUES (%s)', depts)
-        
     c.execute('SELECT count(*) FROM statuses')
     if c.fetchone()[0] == 0:
         stats = [("To Do",), ("In Progress",), ("Review",), ("Done",)]
         c.executemany('INSERT INTO statuses VALUES (%s)', stats)
-
     conn.commit()
     conn.close()
 
@@ -104,7 +84,6 @@ def init_db():
 def run_auto_archive():
     conn = get_db_connection(); c = conn.cursor()
     cutoff_date = date.today() - timedelta(days=30)
-    # Postgres syntax uses %s for parameters
     c.execute("UPDATE tasks SET is_archived = 1 WHERE status = 'Done' AND deadline < %s AND is_archived = 0", (cutoff_date,))
     count = c.rowcount; conn.commit(); conn.close()
     return count
@@ -117,7 +96,6 @@ def delete_task(task_id):
 
 def get_list(table_name):
     conn = get_db_connection(); c = conn.cursor()
-    # Safe usage since table_name is hardcoded in calls
     c.execute(f'SELECT name FROM {table_name}')
     return [item[0] for item in c.fetchall()]
 
@@ -170,22 +148,14 @@ def get_online_users():
 
 def add_task(task_name, department, assignee_list, status, deadline, total, completed):
     conn = get_db_connection(); c = conn.cursor()
-    
-    # Handle Multi-Assignee List -> String
     if isinstance(assignee_list, list): assignee_str = ",".join(assignee_list)
     else: assignee_str = str(assignee_list)
-    
     c.execute('''INSERT INTO tasks 
                  (task_name, department, assignee, status, deadline, total_items, completed_items, is_archived) 
                  VALUES (%s, %s, %s, %s, %s, %s, %s, 0)''', 
                  (task_name, department, assignee_str, status, deadline, total, completed))
     conn.commit(); conn.close()
     get_tasks.clear()
-
-def get_tasks(include_archived=False):
-    conn = get_db_connection()
-    query = "SELECT * FROM tasks" if include_archived else "SELECT * FROM tasks WHERE is_archived = 0"
-    df = pd.read_sql_query(query, conn); conn.close(); return df
 
 def update_task_details(task_id, new_status, new_completed, new_file_path, new_link):
     conn = get_db_connection(); c = conn.cursor()
@@ -208,9 +178,6 @@ def render_metrics(df):
 
 def display_attachment_preview(file_path, link_url):
     if link_url: st.markdown(f"🔗 **Link:** [{link_url}]({link_url})")
-    
-    # NOTE: File preview only works if file exists locally. 
-    # In cloud deployment, this only works for the session the file was uploaded.
     if file_path and os.path.exists(file_path):
         file_ext = os.path.splitext(file_path)[1].lower(); file_name = os.path.basename(file_path)
         if file_ext in ['.png', '.jpg', '.jpeg']: st.image(file_path, caption=file_name, width=200)
@@ -218,15 +185,13 @@ def display_attachment_preview(file_path, link_url):
             with st.expander(f"📊 {file_name}"): st.dataframe(pd.read_csv(file_path).head(5))
         with open(file_path, "rb") as f: st.download_button(f"📥 {file_name}", f, file_name)
 
-# --- NEW: CONFIRMATION DIALOGS ---
+# --- DIALOGS (ADD, UPDATE, DELETE, LOGOUT) ---
 
 @st.dialog("Confirm Deletion")
 def dialog_confirm_delete(item_type, item_name, delete_func, *args):
-    """Generic dialog for deleting tasks, users, depts"""
     st.write(f"Are you sure you want to permanently delete the {item_type}:")
     st.write(f"**{item_name}**")
     st.warning("This action cannot be undone.")
-    
     if st.button("Yes, Delete", type="primary", use_container_width=True):
         with st.spinner(f"Deleting {item_type}..."):
             delete_func(*args)
@@ -235,14 +200,12 @@ def dialog_confirm_delete(item_type, item_name, delete_func, *args):
 
 @st.dialog("Confirm Task Creation")
 def dialog_confirm_add(t_name, t_dept, t_assignee, t_status, t_deadline, t_total, t_completed):
-    """Review details before creating task"""
     st.write("Please review the task details:")
     st.markdown(f"**Task:** {t_name}")
     st.markdown(f"**Department:** {t_dept}")
     st.markdown(f"**Assignee:** {t_assignee}")
     st.markdown(f"**Deadline:** {t_deadline}")
     st.divider()
-    
     if st.button("Confirm & Create", type="primary", use_container_width=True):
         with st.spinner("Saving to database..."):
              add_task(t_name, t_dept, t_assignee, t_status, t_deadline, t_total, t_completed)
@@ -264,25 +227,31 @@ def update_task_dialog(row, status_list):
     new_file = st.file_uploader("Upload File (Temporary)")
     new_link = st.text_input("External Link URL (Permanent)", value=row['task_link'] if row['task_link'] else "")
     st.markdown("---")
-    
-    # Updated Save Button with Spinner
     if st.button("💾 Save Changes", type="primary", use_container_width=True):
         final_path = None
         if new_file:
             final_path = os.path.join(UPLOAD_DIR, new_file.name)
             with open(final_path, "wb") as f: f.write(new_file.getbuffer())
-        
         with st.spinner("Updating Task..."):
             update_task_details(row['id'], new_stat, new_comp, final_path, new_link)
-        
         st.success("Updated!")
         st.rerun()
+
+# --- NEW: LOGOUT DIALOG ---
+@st.dialog("Confirm Logout")
+def dialog_confirm_logout():
+    st.write("Are you sure you want to log out?")
+    if st.button("Log Out", type="primary", use_container_width=True):
+        with st.spinner("Logging out..."):
+            time.sleep(0.5) # Short visual delay
+            st.session_state['logged_in'] = False
+            st.session_state['username'] = None
+            st.session_state['role'] = None
+            st.rerun()
 
 # --- MAIN APP ---
 def main():
     st.set_page_config(page_title="Lynx Tracker", layout="wide", page_icon="🔐")
-    
-    # Initialize DB (Checks connection & creates tables)
     init_db()
 
     if run_auto_archive() > 0: st.toast("🧹 Auto-Archived old tasks.")
@@ -299,8 +268,12 @@ def main():
             with tab_login:
                 u = st.text_input("Username"); p = st.text_input("Password", type='password')
                 if st.button("Login", use_container_width=True):
-                    with st.spinner("Verifying..."):
+                    # --- ADDED LOGIN LOADING ---
+                    with st.spinner("Verifying credentials..."):
                         res = login_user(u, p)
+                        # Added slight artificial delay if response is too fast, so user sees the spinner
+                        if not res: time.sleep(0.5) 
+                    
                     if res: st.session_state['logged_in']=True; st.session_state['username']=u; st.session_state['role']=res[0][2]; update_last_active(u); st.rerun()
                     else: st.error("Invalid Creds")
             with tab_signup:
@@ -323,22 +296,22 @@ def main():
         st.sidebar.markdown("**Online:**"); 
         for u in online_users: 
             if u != st.session_state['username']: st.sidebar.caption(f"🟢 {u}")
-        if st.sidebar.button("Log Out"): st.session_state['logged_in'] = False; st.rerun()
+        
+        # --- CHANGED: LOGOUT TRIGGER ---
+        if st.sidebar.button("Log Out"):
+            dialog_confirm_logout()
+            
         st.sidebar.markdown("---")
 
         # Sidebar: Add Task
         st.sidebar.header("➕ Create Task")
         with st.sidebar.form("new_task"):
             tn = st.text_input("Task Name"); td = st.selectbox("Dept", dept_list if dept_list else ["General"])
-            
-            # Multi-select Assignee
             if users_list: ta = st.multiselect("Assign To", users_list)
             else: ta = st.text_input("Assignee")
-                
             ts = st.selectbox("Status", status_list if status_list else ["To Do"]); tdl = st.date_input("Deadline")
             c1, c2 = st.columns(2); tt = c1.number_input("Total", 1, 100, 5); tc = c2.number_input("Done", 0, 100, 0)
             
-            # Changed to open Confirmation Dialog instead of immediate add
             if st.form_submit_button("Add Task"):
                 dialog_confirm_add(tn, td, ta, ts, tdl, tt, tc)
 
@@ -356,25 +329,20 @@ def main():
         # TAB 1: DASHBOARD
         with current_tab[0]:
             dash_df = df.copy()
-            # If Employee, only show rows where their name appears in assignee string
             if st.session_state['role'] == "Employee":
                 dash_df = df[df['assignee'].astype(str).str.contains(st.session_state['username'], na=False)]
 
             if not dash_df.empty:
                 render_metrics(dash_df)
-                
                 c1, c2, c3 = st.columns(3)
                 c1.subheader("By Dept"); c1.bar_chart(dash_df['department'].value_counts())
                 c2.subheader("By Status"); c2.bar_chart(dash_df['status'].value_counts())
-                
-                # By Employee (Handle Multi-Assignee Explode)
                 c3.subheader("By Employee")
                 try:
                     chart_df = dash_df.assign(assignee=dash_df['assignee'].str.split(',')).explode('assignee')
                     chart_df['assignee'] = chart_df['assignee'].str.strip()
                     c3.bar_chart(chart_df['assignee'].value_counts())
                 except: st.caption("No data")
-                
                 st.markdown("### 📄 List")
                 lim = st.selectbox("Show:", [10, 20, 50, "All"])
                 d_df = dash_df.head(int(lim)) if lim != "All" else dash_df
@@ -398,25 +366,17 @@ def main():
                             with c_info:
                                 st.subheader(row['task_name'])
                                 st.caption(f"📅 Due: {row['deadline']}")
-                                
-                                # Assignee Display
                                 assignees = str(row['assignee']).replace(",", ", ")
                                 st.markdown(f"**👤 Assigned:** `{assignees}`")
-                                
                                 display_attachment_preview(row['file_path'], row['task_link'])
-                            
                             with c_stat:
                                 st.write(f"**Status:** {row['status']}")
                                 prog = int((row['completed_items']/row['total_items'])*100) if row['total_items']>0 else 0
                                 st.progress(prog)
                                 st.caption(f"{row['completed_items']} / {row['total_items']} items")
-
                             with c_act:
-                                # UPDATE DIALOG
                                 if st.button("✏️ Update", key=f"upd_{row['id']}", use_container_width=True):
                                     update_task_dialog(row, status_list)
-                                
-                                # DELETE WITH CONFIRMATION
                                 if st.session_state['role'] == "Manager":
                                     if st.button("🗑️ Delete", key=f"del_{row['id']}", type="primary", use_container_width=True):
                                         dialog_confirm_delete("Task", row['task_name'], delete_task, row['id'])
@@ -433,24 +393,21 @@ def main():
                         with st.spinner("Adding..."):
                             add_item('departments', nd); st.rerun()
                     for d in dept_list: 
-                        if st.button(f"Delete {d}", key=f"d_{d}"): 
-                            dialog_confirm_delete("Department", d, delete_item, 'departments', d)
+                        if st.button(f"Delete {d}", key=f"d_{d}"): dialog_confirm_delete("Department", d, delete_item, 'departments', d)
                 with ac2:
                     st.subheader("Statuses"); ns = st.text_input("New Status")
                     if st.button("Add Status", type="primary"): 
                         with st.spinner("Adding..."):
                             add_item('statuses', ns); st.rerun()
                     for s in status_list:
-                         if st.button(f"Delete {s}", key=f"s_{s}"): 
-                             dialog_confirm_delete("Status", s, delete_item, 'statuses', s)
+                         if st.button(f"Delete {s}", key=f"s_{s}"): dialog_confirm_delete("Status", s, delete_item, 'statuses', s)
                 with ac3:
                     st.subheader("Users")
                     for u in users_list:
                         c_a, c_b = st.columns([2,1])
                         c_a.write(u)
                         if u != st.session_state['username']:
-                             if c_b.button("🗑️", key=f"u_{u}"): 
-                                 dialog_confirm_delete("User", u, delete_user, u)
+                             if c_b.button("🗑️", key=f"u_{u}"): dialog_confirm_delete("User", u, delete_user, u)
 
 if __name__ == "__main__":
     main()
