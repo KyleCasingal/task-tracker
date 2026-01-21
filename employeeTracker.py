@@ -4,6 +4,7 @@ import psycopg2
 from datetime import datetime, date, timedelta
 import os
 import hashlib
+from streamlit import cache_data
 
 # --- CONFIGURATION & SETUP ---
 # NOTE: Files uploaded to 'uploads' on Streamlit Cloud are temporary and will vanish on reboot.
@@ -34,6 +35,17 @@ def check_hashes(password, hashed_text):
     if make_hashes(password) == hashed_text:
         return hashed_text
     return False
+
+
+# --- CACHE DATA ---
+@st.cache_data(ttl=60) 
+def get_tasks(include_archived=False):
+    conn = get_db_connection()
+    query = "SELECT * FROM tasks" if include_archived else "SELECT * FROM tasks WHERE is_archived = 0"
+    df = pd.read_sql_query(query, conn)
+    conn.close()
+    return df
+
 
 # --- DATABASE FUNCTIONS (POSTGRES ADAPTED) ---
 def init_db():
@@ -97,6 +109,7 @@ def delete_task(task_id):
     conn = get_db_connection(); c = conn.cursor()
     c.execute("DELETE FROM tasks WHERE id = %s", (task_id,))
     conn.commit(); conn.close()
+    get_tasks.clear()
 
 def get_list(table_name):
     conn = get_db_connection(); c = conn.cursor()
@@ -163,6 +176,7 @@ def add_task(task_name, department, assignee_list, status, deadline, total, comp
                  VALUES (%s, %s, %s, %s, %s, %s, %s, 0)''', 
                  (task_name, department, assignee_str, status, deadline, total, completed))
     conn.commit(); conn.close()
+    get_tasks.clear()
 
 def get_tasks(include_archived=False):
     conn = get_db_connection()
@@ -177,6 +191,7 @@ def update_task_details(task_id, new_status, new_completed, new_file_path, new_l
     if new_link: query += ", task_link = %s"; params.append(new_link)
     query += " WHERE id = %s"; params.append(task_id)
     c.execute(query, tuple(params)); conn.commit(); conn.close()
+    get_tasks.clear()
 
 def render_metrics(df):
     today = date.today()
