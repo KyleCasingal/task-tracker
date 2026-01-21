@@ -218,7 +218,37 @@ def display_attachment_preview(file_path, link_url):
             with st.expander(f"📊 {file_name}"): st.dataframe(pd.read_csv(file_path).head(5))
         with open(file_path, "rb") as f: st.download_button(f"📥 {file_name}", f, file_name)
 
-# --- DIALOG ---
+# --- NEW: CONFIRMATION DIALOGS ---
+
+@st.dialog("Confirm Deletion")
+def dialog_confirm_delete(item_type, item_name, delete_func, *args):
+    """Generic dialog for deleting tasks, users, depts"""
+    st.write(f"Are you sure you want to permanently delete the {item_type}:")
+    st.write(f"**{item_name}**")
+    st.warning("This action cannot be undone.")
+    
+    if st.button("Yes, Delete", type="primary", use_container_width=True):
+        with st.spinner(f"Deleting {item_type}..."):
+            delete_func(*args)
+        st.success("Deleted successfully!")
+        st.rerun()
+
+@st.dialog("Confirm Task Creation")
+def dialog_confirm_add(t_name, t_dept, t_assignee, t_status, t_deadline, t_total, t_completed):
+    """Review details before creating task"""
+    st.write("Please review the task details:")
+    st.markdown(f"**Task:** {t_name}")
+    st.markdown(f"**Department:** {t_dept}")
+    st.markdown(f"**Assignee:** {t_assignee}")
+    st.markdown(f"**Deadline:** {t_deadline}")
+    st.divider()
+    
+    if st.button("Confirm & Create", type="primary", use_container_width=True):
+        with st.spinner("Saving to database..."):
+             add_task(t_name, t_dept, t_assignee, t_status, t_deadline, t_total, t_completed)
+        st.success("Task Created!")
+        st.rerun()
+
 @st.dialog("Update Task Details")
 def update_task_dialog(row, status_list):
     st.write(f"Editing: **{row['task_name']}**")
@@ -234,13 +264,19 @@ def update_task_dialog(row, status_list):
     new_file = st.file_uploader("Upload File (Temporary)")
     new_link = st.text_input("External Link URL (Permanent)", value=row['task_link'] if row['task_link'] else "")
     st.markdown("---")
+    
+    # Updated Save Button with Spinner
     if st.button("💾 Save Changes", type="primary", use_container_width=True):
         final_path = None
         if new_file:
             final_path = os.path.join(UPLOAD_DIR, new_file.name)
             with open(final_path, "wb") as f: f.write(new_file.getbuffer())
-        update_task_details(row['id'], new_stat, new_comp, final_path, new_link)
-        st.success("Updated!"); st.rerun()
+        
+        with st.spinner("Updating Task..."):
+            update_task_details(row['id'], new_stat, new_comp, final_path, new_link)
+        
+        st.success("Updated!")
+        st.rerun()
 
 # --- MAIN APP ---
 def main():
@@ -263,14 +299,16 @@ def main():
             with tab_login:
                 u = st.text_input("Username"); p = st.text_input("Password", type='password')
                 if st.button("Login", use_container_width=True):
-                    res = login_user(u, p)
+                    with st.spinner("Verifying..."):
+                        res = login_user(u, p)
                     if res: st.session_state['logged_in']=True; st.session_state['username']=u; st.session_state['role']=res[0][2]; update_last_active(u); st.rerun()
                     else: st.error("Invalid Creds")
             with tab_signup:
                 nu = st.text_input("New User"); np = st.text_input("New Pass", type='password'); nr = st.selectbox("Role", ["Employee", "Manager"])
                 if st.button("Create Account", use_container_width=True):
-                    if create_user(nu, np, nr): st.success("Created! Go to Login.")
-                    else: st.warning("Exists.")
+                    with st.spinner("Creating account..."):
+                        if create_user(nu, np, nr): st.success("Created! Go to Login.")
+                        else: st.warning("Exists.")
 
     # --- LOGGED IN AREA ---
     else:
@@ -299,9 +337,10 @@ def main():
                 
             ts = st.selectbox("Status", status_list if status_list else ["To Do"]); tdl = st.date_input("Deadline")
             c1, c2 = st.columns(2); tt = c1.number_input("Total", 1, 100, 5); tc = c2.number_input("Done", 0, 100, 0)
-            if st.form_submit_button("Add"): 
-                add_task(tn, td, ta, ts, tdl, tt, tc)
-                st.toast("Added!"); st.rerun()
+            
+            # Changed to open Confirmation Dialog instead of immediate add
+            if st.form_submit_button("Add Task"):
+                dialog_confirm_add(tn, td, ta, ts, tdl, tt, tc)
 
         # Fetch Data
         show_archived = False
@@ -373,11 +412,14 @@ def main():
                                 st.caption(f"{row['completed_items']} / {row['total_items']} items")
 
                             with c_act:
+                                # UPDATE DIALOG
                                 if st.button("✏️ Update", key=f"upd_{row['id']}", use_container_width=True):
                                     update_task_dialog(row, status_list)
+                                
+                                # DELETE WITH CONFIRMATION
                                 if st.session_state['role'] == "Manager":
                                     if st.button("🗑️ Delete", key=f"del_{row['id']}", type="primary", use_container_width=True):
-                                        delete_task(row['id']); st.rerun()
+                                        dialog_confirm_delete("Task", row['task_name'], delete_task, row['id'])
                     st.write("")
             else: st.info("No tasks.")
 
@@ -387,21 +429,28 @@ def main():
                 st.header("Admin"); ac1, ac2, ac3 = st.columns(3)
                 with ac1:
                     st.subheader("Depts"); nd = st.text_input("New Dept")
-                    if st.button("Add Dept", type="primary"): add_item('departments', nd); st.rerun()
+                    if st.button("Add Dept", type="primary"): 
+                        with st.spinner("Adding..."):
+                            add_item('departments', nd); st.rerun()
                     for d in dept_list: 
-                        if st.button(f"Delete {d}", key=f"d_{d}"): delete_item('departments', d); st.rerun()
+                        if st.button(f"Delete {d}", key=f"d_{d}"): 
+                            dialog_confirm_delete("Department", d, delete_item, 'departments', d)
                 with ac2:
                     st.subheader("Statuses"); ns = st.text_input("New Status")
-                    if st.button("Add Status", type="primary"): add_item('statuses', ns); st.rerun()
+                    if st.button("Add Status", type="primary"): 
+                        with st.spinner("Adding..."):
+                            add_item('statuses', ns); st.rerun()
                     for s in status_list:
-                         if st.button(f"Delete {s}", key=f"s_{s}"): delete_item('statuses', s); st.rerun()
+                         if st.button(f"Delete {s}", key=f"s_{s}"): 
+                             dialog_confirm_delete("Status", s, delete_item, 'statuses', s)
                 with ac3:
                     st.subheader("Users")
                     for u in users_list:
                         c_a, c_b = st.columns([2,1])
                         c_a.write(u)
                         if u != st.session_state['username']:
-                             if c_b.button("🗑️", key=f"u_{u}"): delete_user(u); st.rerun()
+                             if c_b.button("🗑️", key=f"u_{u}"): 
+                                 dialog_confirm_delete("User", u, delete_user, u)
 
 if __name__ == "__main__":
     main()
