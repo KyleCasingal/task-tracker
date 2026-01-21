@@ -16,13 +16,17 @@ if not os.path.exists(UPLOAD_DIR):
 
 # --- DATABASE CONNECTION ---
 def get_db_connection():
+    """Establishes connection to Supabase/Postgres"""
     try:
-        # We assume st.secrets["DB_URL"] contains the string
-        return psycopg2.connect(
-            st.secrets["DB_URL"], 
-            connect_timeout=10,  # Fail fast if network is bad
-            sslmode='require'    # Force SSL
-        )
+        # 1. Try to get URL from the Computer's Environment (Render/Docker)
+        db_url = os.getenv("DB_URL")
+        
+        # 2. If not found, try getting from Streamlit Secrets (Local Testing)
+        if not db_url:
+            db_url = st.secrets["DB_URL"]
+            
+        return psycopg2.connect(db_url)
+        
     except Exception as e:
         st.error(f"❌ Database Connection Error: {e}")
         st.stop()
