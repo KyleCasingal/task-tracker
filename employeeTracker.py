@@ -268,6 +268,167 @@ def main():
             with tab_login:
                 u = st.text_input("Username"); p = st.text_input("Password", type='password')
                 if st.button("Login", use_container_width=True):
+                    with st.spinner("Verifying credentials..."):
+                        res = login_user(u, p)
+                        if not res: time.sleep(0.5) 
+                    
+                    if res: st.session_state['logged_in']=True; st.session_state['username']=u; st.session_state['role']=res[0][2]; update_last_active(u); st.rerun()
+                    else: st.error("Invalid Creds")
+            with tab_signup:
+                nu = st.text_input("New User"); np = st.text_input("New Pass", type='password'); nr = st.selectbox("Role", ["Employee", "Manager"])
+                if st.button("Create Account", use_container_width=True):
+                    with st.spinner("Creating account..."):
+                        if create_user(nu, np, nr): st.success("Created! Go to Login.")
+                        else: st.warning("Exists.")
+
+    # --- LOGGED IN AREA ---
+    else:
+        update_last_active(st.session_state['username'])
+        online_users = get_online_users()
+        dept_list = get_list('departments')
+        status_list = get_list('statuses')
+        users_list = get_all_users_list()
+
+        # Sidebar
+        st.sidebar.write(f"👤 **{st.session_state['username']}** ({st.session_state['role']})")
+        st.sidebar.markdown("**Online:**"); 
+        for u in online_users: 
+            if u != st.session_state['username']: st.sidebar.caption(f"🟢 {u}")
+        
+        if st.sidebar.button("Log Out"):
+            dialog_confirm_logout()
+            
+        st.sidebar.markdown("---")
+
+        # Sidebar: Add Task
+        st.sidebar.header("➕ Create Task")
+        with st.sidebar.form("new_task"):
+            tn = st.text_input("Task Name"); td = st.selectbox("Dept", dept_list if dept_list else ["General"])
+            if users_list: ta = st.multiselect("Assign To", users_list)
+            else: ta = st.text_input("Assignee")
+            ts = st.selectbox("Status", status_list if status_list else ["To Do"]); tdl = st.date_input("Deadline")
+            c1, c2 = st.columns(2); tt = c1.number_input("Total", 1, 100, 5); tc = c2.number_input("Done", 0, 100, 0)
+            
+            if st.form_submit_button("Add Task"):
+                dialog_confirm_add(tn, td, ta, ts, tdl, tt, tc)
+
+        # Fetch Data
+        show_archived = False
+        if st.session_state['role'] == "Manager": show_archived = st.sidebar.checkbox("Show Archived")
+        df = get_tasks(show_archived)
+        
+        # --- APP TABS ---
+        st.title("📊 Lynx Task Tracker")
+        tabs = ["📈 Dashboard", "👤 My Workspace"]
+        if st.session_state['role'] == "Manager": tabs.append("🛠️ Admin")
+        current_tab = st.tabs(tabs)
+
+        # TAB 1: DASHBOARD
+        with current_tab[0]:
+            dash_df = df.copy()
+            
+            # --- FIXED FILTERING LOGIC ---
+            if st.session_state['role'] == "Employee":
+                # This explicitly splits the "Alice,Bob" string into a list ['Alice', 'Bob']
+                # and checks if the current user is in that list.
+                dash_df = df[df['assignee'].astype(str).apply(lambda x: st.session_state['username'] in [a.strip() for a in x.split(',')])]
+
+            if not dash_df.empty:
+                render_metrics(dash_df)
+                c1, c2, c3 = st.columns(3)
+                c1.subheader("By Dept"); c1.bar_chart(dash_df['department'].value_counts())
+                c2.subheader("By Status"); c2.bar_chart(dash_df['status'].value_counts())
+                c3.subheader("By Employee")
+                try:
+                    chart_df = dash_df.assign(assignee=dash_df['assignee'].str.split(',')).explode('assignee')
+                    chart_df['assignee'] = chart_df['assignee'].str.strip()
+                    c3.bar_chart(chart_df['assignee'].value_counts())
+                except: st.caption("No data")
+                st.markdown("### 📄 List")
+                lim = st.selectbox("Show:", [10, 20, 50, "All"])
+                d_df = dash_df.head(int(lim)) if lim != "All" else dash_df
+                st.dataframe(d_df[['task_name', 'department', 'status', 'deadline', 'completed_items']], use_container_width=True)
+            else: st.info("No tasks.")
+
+        # TAB 2: WORKSPACE
+        with current_tab[1]:
+            st.header("Active Tasks")
+            work_df = df.copy()
+            
+            # --- FIXED FILTERING LOGIC ---
+            if st.session_state['role'] == "Employee":
+                # Same robust split-and-check logic as above
+                work_df = df[df['assignee'].astype(str).apply(lambda x: st.session_state['username'] in [a.strip() for a in x.split(',')])]
+
+            if not work_df.empty:
+                for dept in work_df['department'].unique():
+                    st.markdown(f"### 📂 {dept}")
+                    st.markdown("---")
+                    for idx, row in work_df[work_df['department'] == dept].iterrows():
+                        with st.container(border=True):
+                            c_info, c_stat, c_act = st.columns([3, 2, 1])
+                            with c_info:
+                                st.subheader(row['task_name'])
+                                st.caption(f"📅 Due: {row['deadline']}")
+                                assignees = str(row['assignee']).replace(",", ", ")
+                                st.markdown(f"**👤 Assigned:** `{assignees}`")
+                                display_attachment_preview(row['file_path'], row['task_link'])
+                            with c_stat:
+                                st.write(f"**Status:** {row['status']}")
+                                prog = int((row['completed_items']/row['total_items'])*100) if row['total_items']>0 else 0
+                                st.progress(prog)
+                                st.caption(f"{row['completed_items']} / {row['total_items']} items")
+                            with c_act:
+                                if st.button("✏️ Update", key=f"upd_{row['id']}", use_container_width=True):
+                                    update_task_dialog(row, status_list)
+                                if st.session_state['role'] == "Manager":
+                                    if st.button("🗑️ Delete", key=f"del_{row['id']}", type="primary", use_container_width=True):
+                                        dialog_confirm_delete("Task", row['task_name'], delete_task, row['id'])
+                    st.write("")
+            else: st.info("No tasks.")
+
+        # TAB 3: ADMIN
+        if st.session_state['role'] == "Manager":
+            with current_tab[2]:
+                st.header("Admin"); ac1, ac2, ac3 = st.columns(3)
+                with ac1:
+                    st.subheader("Depts"); nd = st.text_input("New Dept")
+                    if st.button("Add Dept", type="primary"): 
+                        with st.spinner("Adding..."):
+                            add_item('departments', nd); st.rerun()
+                    for d in dept_list: 
+                        if st.button(f"Delete {d}", key=f"d_{d}"): dialog_confirm_delete("Department", d, delete_item, 'departments', d)
+                with ac2:
+                    st.subheader("Statuses"); ns = st.text_input("New Status")
+                    if st.button("Add Status", type="primary"): 
+                        with st.spinner("Adding..."):
+                            add_item('statuses', ns); st.rerun()
+                    for s in status_list:
+                         if st.button(f"Delete {s}", key=f"s_{s}"): dialog_confirm_delete("Status", s, delete_item, 'statuses', s)
+                with ac3:
+                    st.subheader("Users")
+                    for u in users_list:
+                        c_a, c_b = st.columns([2,1])
+                        c_a.write(u)
+                        if u != st.session_state['username']:
+                             if c_b.button("🗑️", key=f"u_{u}"): dialog_confirm_delete("User", u, delete_user, u)
+    st.set_page_config(page_title="Lynx Tracker", layout="wide", page_icon="🔐")
+    init_db()
+
+    if run_auto_archive() > 0: st.toast("🧹 Auto-Archived old tasks.")
+
+    if 'logged_in' not in st.session_state:
+        st.session_state['logged_in'] = False; st.session_state['username'] = None; st.session_state['role'] = None
+
+    # --- LOGIN SCREEN ---
+    if not st.session_state['logged_in']:
+        col1, col2, col3 = st.columns([1, 1, 1])
+        with col2:
+            st.markdown("<h1 style='text-align: center;'>🔐 Login</h1>", unsafe_allow_html=True); st.markdown("---")
+            tab_login, tab_signup = st.tabs(["Login", "Register"])
+            with tab_login:
+                u = st.text_input("Username"); p = st.text_input("Password", type='password')
+                if st.button("Login", use_container_width=True):
                     # --- ADDED LOGIN LOADING ---
                     with st.spinner("Verifying credentials..."):
                         res = login_user(u, p)
