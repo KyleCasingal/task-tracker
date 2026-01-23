@@ -268,8 +268,10 @@ def main():
             with tab_login:
                 u = st.text_input("Username"); p = st.text_input("Password", type='password')
                 if st.button("Login", use_container_width=True):
+                    # --- ADDED LOGIN LOADING ---
                     with st.spinner("Verifying credentials..."):
                         res = login_user(u, p)
+                        # Added slight artificial delay if response is too fast, so user sees the spinner
                         if not res: time.sleep(0.5) 
                     
                     if res: st.session_state['logged_in']=True; st.session_state['username']=u; st.session_state['role']=res[0][2]; update_last_active(u); st.rerun()
@@ -295,6 +297,7 @@ def main():
         for u in online_users: 
             if u != st.session_state['username']: st.sidebar.caption(f"🟢 {u}")
         
+        # --- CHANGED: LOGOUT TRIGGER ---
         if st.sidebar.button("Log Out"):
             dialog_confirm_logout()
             
@@ -326,12 +329,8 @@ def main():
         # TAB 1: DASHBOARD
         with current_tab[0]:
             dash_df = df.copy()
-            
-            # --- FIXED FILTERING LOGIC ---
             if st.session_state['role'] == "Employee":
-                # This explicitly splits the "Alice,Bob" string into a list ['Alice', 'Bob']
-                # and checks if the current user is in that list.
-                dash_df = df[df['assignee'].astype(str).apply(lambda x: st.session_state['username'] in [a.strip() for a in x.split(',')])]
+                dash_df = df[df['assignee'].astype(str).str.contains(st.session_state['username'], na=False)]
 
             if not dash_df.empty:
                 render_metrics(dash_df)
@@ -354,11 +353,8 @@ def main():
         with current_tab[1]:
             st.header("Active Tasks")
             work_df = df.copy()
-            
-            # --- FIXED FILTERING LOGIC ---
             if st.session_state['role'] == "Employee":
-                # Same robust split-and-check logic as above
-                work_df = df[df['assignee'].astype(str).apply(lambda x: st.session_state['username'] in [a.strip() for a in x.split(',')])]
+                work_df = df[df['assignee'].astype(str).str.contains(st.session_state['username'], na=False)]
 
             if not work_df.empty:
                 for dept in work_df['department'].unique():
@@ -412,3 +408,6 @@ def main():
                         c_a.write(u)
                         if u != st.session_state['username']:
                              if c_b.button("🗑️", key=f"u_{u}"): dialog_confirm_delete("User", u, delete_user, u)
+
+if __name__ == "__main__":
+    main()
