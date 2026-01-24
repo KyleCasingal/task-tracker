@@ -4,21 +4,58 @@ import psycopg2
 from datetime import datetime, date, timedelta
 import os
 import hashlib
-import time  # Added for visual delay effects
+import time
+import uuid
 from streamlit import cache_data
+from supabase import create_client, Client
 
 # --- CONFIGURATION & SETUP ---
-UPLOAD_DIR = "uploads"
-if not os.path.exists(UPLOAD_DIR):
-    os.makedirs(UPLOAD_DIR)
+# We no longer use a local UPLOAD_DIR because Streamlit Cloud deletes it.
+
+# --- SUPABASE STORAGE CONNECTION ---
+def init_supabase():
+    """Initialize Supabase Client for Storage"""
+    # Try getting secrets from Streamlit's secret manager
+    try:
+        url = st.secrets["SUPABASE_URL"]
+        key = st.secrets["SUPABASE_KEY"]
+        return create_client(url, key)
+    except Exception as e:
+        st.error("❌ Supabase Secrets missing! Add SUPABASE_URL and SUPABASE_KEY to .streamlit/secrets.toml")
+        st.stop()
+
+# --- FILE UPLOAD HELPER ---
+def upload_file_to_supabase(uploaded_file):
+    """Uploads a file to Supabase Storage and returns the Public URL"""
+    if not uploaded_file:
+        return None
+    
+    supabase = init_supabase()
+    bucket_name = "task-files"
+    
+    # Create a unique filename (uuid) so files don't overwrite each other
+    file_ext = os.path.splitext(uploaded_file.name)[1]
+    unique_filename = f"{uuid.uuid4()}{file_ext}"
+    
+    try:
+        file_bytes = uploaded_file.getvalue()
+        # Upload to Supabase Bucket
+        supabase.storage.from_(bucket_name).upload(
+            path=unique_filename, 
+            file=file_bytes, 
+            file_options={"content-type": uploaded_file.type}
+        )
+        # Get the Public URL so anyone with the link can view it
+        public_url = supabase.storage.from_(bucket_name).get_public_url(unique_filename)
+        return public_url
+    except Exception as e:
+        st.error(f"Upload Failed: {e}")
+        return None
 
 # --- DATABASE CONNECTION ---
 def get_db_connection():
     try:
-        db_url = os.getenv("DB_URL")
-        if not db_url:
-            db_url = st.secrets["DB_URL"]
-        return psycopg2.connect(db_url)
+        return psycopg2.connect(st.secrets["DB_URL"])
     except Exception as e:
         st.error(f"❌ Database Connection Error: {e}")
         st.stop()
@@ -41,10 +78,32 @@ def get_tasks(include_archived=False):
     conn.close()
     return df
 
+# --- HELPER: DATE CALCULATOR ---
+def get_next_schedule_date(start_date, frequency, days_list_str=None):
+    if frequency == "Daily":
+        return start_date + timedelta(days=1)
+    elif frequency == "Weekly":
+        return start_date + timedelta(weeks=1)
+    elif frequency == "Monthly":
+        return start_date + timedelta(days=30)
+    elif frequency == "Specific Days" and days_list_str:
+        day_map = {"Mon": 0, "Tue": 1, "Wed": 2, "Thu": 3, "Fri": 4, "Sat": 5, "Sun": 6}
+        target_days = sorted([day_map[d] for d in days_list_str.split(',') if d in day_map])
+        if not target_days: return start_date + timedelta(days=1) 
+        current_weekday = start_date.weekday()
+        for day_idx in target_days:
+            if day_idx > current_weekday:
+                return start_date + timedelta(days=(day_idx - current_weekday))
+        days_ahead = (6 - current_weekday) + 1 + target_days[0]
+        return start_date + timedelta(days=days_ahead)
+    return start_date + timedelta(days=1)
+
 # --- DATABASE FUNCTIONS ---
 def init_db():
     conn = get_db_connection()
     c = conn.cursor()
+    
+    # 1. Tasks
     c.execute('''CREATE TABLE IF NOT EXISTS tasks (
                     id SERIAL PRIMARY KEY,
                     task_name TEXT,
@@ -54,18 +113,39 @@ def init_db():
                     deadline DATE,
                     total_items INTEGER,
                     completed_items INTEGER,
-                    file_path TEXT,
+                    description TEXT, 
+                    file_path TEXT, 
                     task_link TEXT,
                     is_archived INTEGER DEFAULT 0
                 )''')
+    
     c.execute('''CREATE TABLE IF NOT EXISTS users (
                     username TEXT PRIMARY KEY,
                     password TEXT,
                     role TEXT,
                     last_active TIMESTAMP
                 )''')
+    
     c.execute('''CREATE TABLE IF NOT EXISTS departments (name TEXT PRIMARY KEY)''')
     c.execute('''CREATE TABLE IF NOT EXISTS statuses (name TEXT PRIMARY KEY)''')
+
+    c.execute('''CREATE TABLE IF NOT EXISTS recurring_templates (
+                    id SERIAL PRIMARY KEY,
+                    task_name TEXT,
+                    department TEXT,
+                    assignee TEXT,
+                    frequency TEXT,
+                    days_of_week TEXT, 
+                    next_run_date DATE,
+                    total_items INTEGER,
+                    description TEXT,
+                    task_link TEXT
+                )''')
+    
+    # Migrations just in case
+    try: c.execute("ALTER TABLE tasks ADD COLUMN description TEXT"); conn.commit()
+    except: conn.rollback()
+    
     conn.commit()
     
     # Seed Data
@@ -80,10 +160,37 @@ def init_db():
     conn.commit()
     conn.close()
 
-# --- HELPERS ---
+# --- RECURRING TASK PROCESSOR ---
+def process_recurring_tasks():
+    conn = get_db_connection()
+    c = conn.cursor()
+    today = date.today()
+    c.execute("SELECT * FROM recurring_templates WHERE next_run_date <= %s", (today,))
+    due_templates = c.fetchall()
+    tasks_created = 0
+    colnames = [desc[0] for desc in c.description]
+    
+    for row in due_templates:
+        t = dict(zip(colnames, row))
+        c.execute('''INSERT INTO tasks 
+                     (task_name, department, assignee, status, deadline, total_items, completed_items, is_archived, description, task_link) 
+                     VALUES (%s, %s, %s, %s, %s, %s, 0, 0, %s, %s)''', 
+                     (t['task_name'], t['department'], t['assignee'], "To Do", t['next_run_date'], t['total_items'], t.get('description', ''), t['task_link']))
+        new_date = get_next_schedule_date(t['next_run_date'], t['frequency'], t.get('days_of_week'))
+        c.execute("UPDATE recurring_templates SET next_run_date = %s WHERE id = %s", (new_date, t['id']))
+        tasks_created += 1
+
+    conn.commit()
+    conn.close()
+    if tasks_created > 0:
+        get_tasks.clear()
+        return tasks_created
+    return 0
+
+# --- CORE FUNCTIONS ---
 def run_auto_archive():
     conn = get_db_connection(); c = conn.cursor()
-    cutoff_date = date.today() - timedelta(days=3)
+    cutoff_date = date.today() - timedelta(days=30)
     c.execute("UPDATE tasks SET is_archived = 1 WHERE status = 'Done' AND deadline < %s AND is_archived = 0", (cutoff_date,))
     count = c.rowcount; conn.commit(); conn.close()
     return count
@@ -146,23 +253,55 @@ def get_online_users():
     c.execute("SELECT username FROM users WHERE last_active > %s", (limit,))
     return [u[0] for u in c.fetchall()]
 
-def add_task(task_name, department, assignee_list, status, deadline, total, completed):
+# --- ADD TASK WITH CLOUD UPLOAD ---
+def add_task(task_name, department, assignee_list, status, deadline, total, completed, frequency="Once", days_list=None, task_link="", description="", uploaded_file=None):
+    # 1. Upload File to Supabase (if exists)
+    file_url = None
+    if uploaded_file:
+        file_url = upload_file_to_supabase(uploaded_file)
+    
     conn = get_db_connection(); c = conn.cursor()
+    
     if isinstance(assignee_list, list): assignee_str = ",".join(assignee_list)
     else: assignee_str = str(assignee_list)
+    days_str = ",".join(days_list) if days_list else None
+    
+    # 2. Insert into DB (file_path is now file_url)
     c.execute('''INSERT INTO tasks 
-                 (task_name, department, assignee, status, deadline, total_items, completed_items, is_archived) 
-                 VALUES (%s, %s, %s, %s, %s, %s, %s, 0)''', 
-                 (task_name, department, assignee_str, status, deadline, total, completed))
+                 (task_name, department, assignee, status, deadline, total_items, completed_items, is_archived, description, task_link, file_path) 
+                 VALUES (%s, %s, %s, %s, %s, %s, %s, 0, %s, %s, %s)''', 
+                 (task_name, department, assignee_str, status, deadline, total, completed, description, task_link, file_url))
+    
+    if frequency != "Once":
+        next_run = get_next_schedule_date(deadline, frequency, days_str)
+        c.execute('''INSERT INTO recurring_templates 
+                     (task_name, department, assignee, frequency, days_of_week, next_run_date, total_items, description, task_link)
+                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)''',
+                     (task_name, department, assignee_str, frequency, days_str, next_run, total, description, task_link))
+
     conn.commit(); conn.close()
     get_tasks.clear()
 
-def update_task_details(task_id, new_status, new_completed, new_file_path, new_link):
+# --- UPDATE TASK WITH CLOUD UPLOAD ---
+def update_task_details(task_id, new_status, new_completed, new_link, new_desc, new_uploaded_file=None):
+    # 1. Upload new file if provided
+    new_file_url = None
+    if new_uploaded_file:
+        new_file_url = upload_file_to_supabase(new_uploaded_file)
+        
     conn = get_db_connection(); c = conn.cursor()
-    query = "UPDATE tasks SET status = %s, completed_items = %s"
-    params = [new_status, new_completed]
-    if new_file_path: query += ", file_path = %s"; params.append(new_file_path)
-    if new_link: query += ", task_link = %s"; params.append(new_link)
+    query = "UPDATE tasks SET status = %s, completed_items = %s, description = %s"
+    params = [new_status, new_completed, new_desc]
+    
+    # Only update file_path if a new file was uploaded
+    if new_file_url: 
+        query += ", file_path = %s"
+        params.append(new_file_url)
+        
+    if new_link: 
+        query += ", task_link = %s"
+        params.append(new_link)
+    
     query += " WHERE id = %s"; params.append(task_id)
     c.execute(query, tuple(params)); conn.commit(); conn.close()
     get_tasks.clear()
@@ -176,41 +315,45 @@ def render_metrics(df):
     m3.metric("Pending", len(df[df['status'] != 'Done'])); m4.metric("Overdue 🚨", len(df[df['is_overdue'] == True]))
     st.markdown("---")
 
-def display_attachment_preview(file_path, link_url):
+def display_attachment_preview(file_url, link_url):
+    """Displays cloud files or links"""
     if link_url: st.markdown(f"🔗 **Link:** [{link_url}]({link_url})")
-    if file_path and os.path.exists(file_path):
-        file_ext = os.path.splitext(file_path)[1].lower(); file_name = os.path.basename(file_path)
-        if file_ext in ['.png', '.jpg', '.jpeg']: st.image(file_path, caption=file_name, width=200)
-        elif file_ext == '.csv':
-            with st.expander(f"📊 {file_name}"): st.dataframe(pd.read_csv(file_path).head(5))
-        with open(file_path, "rb") as f: st.download_button(f"📥 {file_name}", f, file_name)
+    
+    # If we have a file_url (from Supabase), display it
+    if file_url:
+        st.markdown(f"📎 **Attached File:** [Download]({file_url})")
+        # Try to preview images
+        if any(ext in str(file_url).lower() for ext in ['.png', '.jpg', '.jpeg', '.gif']):
+            st.image(file_url, width=200)
 
-# --- DIALOGS (ADD, UPDATE, DELETE, LOGOUT) ---
-
+# --- DIALOGS ---
 @st.dialog("Confirm Deletion")
 def dialog_confirm_delete(item_type, item_name, delete_func, *args):
-    st.write(f"Are you sure you want to permanently delete the {item_type}:")
-    st.write(f"**{item_name}**")
-    st.warning("This action cannot be undone.")
+    st.write(f"Delete {item_type}: **{item_name}**?")
+    st.warning("Cannot be undone.")
     if st.button("Yes, Delete", type="primary", use_container_width=True):
-        with st.spinner(f"Deleting {item_type}..."):
+        with st.spinner(f"Deleting..."):
             delete_func(*args)
-        st.success("Deleted successfully!")
-        st.rerun()
+        st.success("Deleted!"); st.rerun()
 
 @st.dialog("Confirm Task Creation")
-def dialog_confirm_add(t_name, t_dept, t_assignee, t_status, t_deadline, t_total, t_completed):
-    st.write("Please review the task details:")
+def dialog_confirm_add(t_name, t_dept, t_assignee, t_status, t_deadline, t_total, t_completed, t_freq, t_days, t_link, t_desc, t_file):
+    st.write("Review Details:")
     st.markdown(f"**Task:** {t_name}")
-    st.markdown(f"**Department:** {t_dept}")
     st.markdown(f"**Assignee:** {t_assignee}")
-    st.markdown(f"**Deadline:** {t_deadline}")
+    freq_msg = t_freq
+    if t_freq == "Specific Days" and t_days: freq_msg = f"{t_freq} ({', '.join(t_days)})"
+    st.markdown(f"**Frequency:** {freq_msg}")
+    
+    if t_file: st.markdown(f"**Attachment:** {t_file.name}")
+    if t_desc:
+        with st.expander("View Description"): st.write(t_desc)
+    
     st.divider()
     if st.button("Confirm & Create", type="primary", use_container_width=True):
-        with st.spinner("Saving to database..."):
-             add_task(t_name, t_dept, t_assignee, t_status, t_deadline, t_total, t_completed)
-        st.success("Task Created!")
-        st.rerun()
+        with st.spinner("Uploading & Saving..."):
+             add_task(t_name, t_dept, t_assignee, t_status, t_deadline, t_total, t_completed, t_freq, t_days, t_link, t_desc, t_file)
+        st.success("Created!"); st.rerun()
 
 @st.dialog("Update Task Details")
 def update_task_dialog(row, status_list):
@@ -221,45 +364,45 @@ def update_task_dialog(row, status_list):
     if row['status'] not in current_status_list: current_status_list.append(row['status'])
     new_stat = c2.selectbox("Status", current_status_list, index=current_status_list.index(row['status']))
     st.progress(int((new_comp/row['total_items'])*100) if row['total_items']>0 else 0)
+    
+    st.markdown("---")
+    current_desc = row['description'] if row['description'] else ""
+    st.markdown("#### 📝 Verbal Report / Description")
+    new_desc = st.text_area("Update status, add notes, or describe issues:", value=current_desc, height=150)
+
     st.markdown("---")
     st.markdown("#### 📎 Attachments")
-    st.caption("Note: Direct file uploads are temporary. Use External Links for permanent storage.")
-    new_file = st.file_uploader("Upload File (Temporary)")
-    new_link = st.text_input("External Link URL (Permanent)", value=row['task_link'] if row['task_link'] else "")
+    # File uploader now goes to Cloud
+    new_file = st.file_uploader("Upload New File (Overwrites old)")
+    new_link = st.text_input("External Link URL", value=row['task_link'] if row['task_link'] else "")
     st.markdown("---")
-    if st.button("💾 Save Changes", type="primary", use_container_width=True):
-        final_path = None
-        if new_file:
-            final_path = os.path.join(UPLOAD_DIR, new_file.name)
-            with open(final_path, "wb") as f: f.write(new_file.getbuffer())
-        with st.spinner("Updating Task..."):
-            update_task_details(row['id'], new_stat, new_comp, final_path, new_link)
-        st.success("Updated!")
-        st.rerun()
+    
+    if st.button("💾 Save", type="primary", use_container_width=True):
+        with st.spinner("Updating..."):
+            # Update function now accepts the file object directly
+            update_task_details(row['id'], new_stat, new_comp, new_link, new_desc, new_file)
+        st.success("Updated!"); st.rerun()
 
-# --- NEW: LOGOUT DIALOG ---
 @st.dialog("Confirm Logout")
 def dialog_confirm_logout():
-    st.write("Are you sure you want to log out?")
+    st.write("Are you sure?")
     if st.button("Log Out", type="primary", use_container_width=True):
         with st.spinner("Logging out..."):
-            time.sleep(0.5) # Short visual delay
-            st.session_state['logged_in'] = False
-            st.session_state['username'] = None
-            st.session_state['role'] = None
-            st.rerun()
+            time.sleep(0.5)
+            st.session_state['logged_in'] = False; st.session_state['username'] = None; st.session_state['role'] = None; st.rerun()
 
 # --- MAIN APP ---
 def main():
     st.set_page_config(page_title="Lynx Tracker", layout="wide", page_icon="🔐")
     init_db()
 
-    if run_auto_archive() > 0: st.toast("🧹 Auto-Archived old tasks.")
+    new_recurr = process_recurring_tasks()
+    if new_recurr > 0: st.toast(f"🔄 Generated {new_recurr} recurring tasks!")
+    if run_auto_archive() > 0: st.toast("🧹 Auto-Archived.")
 
     if 'logged_in' not in st.session_state:
         st.session_state['logged_in'] = False; st.session_state['username'] = None; st.session_state['role'] = None
 
-    # --- LOGIN SCREEN ---
     if not st.session_state['logged_in']:
         col1, col2, col3 = st.columns([1, 1, 1])
         with col2:
@@ -268,20 +411,18 @@ def main():
             with tab_login:
                 u = st.text_input("Username"); p = st.text_input("Password", type='password')
                 if st.button("Login", use_container_width=True):
-                    with st.spinner("Verifying credentials..."):
-                        res = login_user(u, p)
-                        if not res: time.sleep(0.5) 
-                    
+                    with st.spinner("Verifying..."):
+                        res = login_user(u, p); 
+                        if not res: time.sleep(0.5)
                     if res: st.session_state['logged_in']=True; st.session_state['username']=u; st.session_state['role']=res[0][2]; update_last_active(u); st.rerun()
                     else: st.error("Invalid Creds")
             with tab_signup:
                 nu = st.text_input("New User"); np = st.text_input("New Pass", type='password'); nr = st.selectbox("Role", ["Employee", "Manager"])
                 if st.button("Create Account", use_container_width=True):
-                    with st.spinner("Creating account..."):
-                        if create_user(nu, np, nr): st.success("Created! Go to Login.")
+                    with st.spinner("Creating..."):
+                        if create_user(nu, np, nr): st.success("Created! Login now.")
                         else: st.warning("Exists.")
 
-    # --- LOGGED IN AREA ---
     else:
         update_last_active(st.session_state['username'])
         online_users = get_online_users()
@@ -289,48 +430,46 @@ def main():
         status_list = get_list('statuses')
         users_list = get_all_users_list()
 
-        # Sidebar
         st.sidebar.write(f"👤 **{st.session_state['username']}** ({st.session_state['role']})")
         st.sidebar.markdown("**Online:**"); 
         for u in online_users: 
             if u != st.session_state['username']: st.sidebar.caption(f"🟢 {u}")
-        
-        if st.sidebar.button("Log Out"):
-            dialog_confirm_logout()
-            
+        if st.sidebar.button("Log Out"): dialog_confirm_logout()
         st.sidebar.markdown("---")
 
-        # Sidebar: Add Task
         st.sidebar.header("➕ Create Task")
-        with st.sidebar.form("new_task"):
-            tn = st.text_input("Task Name"); td = st.selectbox("Dept", dept_list if dept_list else ["General"])
-            if users_list: ta = st.multiselect("Assign To", users_list)
-            else: ta = st.text_input("Assignee")
-            ts = st.selectbox("Status", status_list if status_list else ["To Do"]); tdl = st.date_input("Deadline")
-            c1, c2 = st.columns(2); tt = c1.number_input("Total", 1, 100, 5); tc = c2.number_input("Done", 0, 100, 0)
-            
-            if st.form_submit_button("Add Task"):
-                dialog_confirm_add(tn, td, ta, ts, tdl, tt, tc)
+        
+        tn = st.sidebar.text_input("Task Name")
+        td = st.sidebar.selectbox("Dept", dept_list if dept_list else ["General"])
+        if users_list: ta = st.sidebar.multiselect("Assign To", users_list)
+        else: ta = st.sidebar.text_input("Assignee")
+        freq = st.sidebar.selectbox("Frequency", ["Once", "Daily", "Weekly", "Monthly", "Specific Days"])
+        days_selected = []
+        if freq == "Specific Days":
+            days_selected = st.sidebar.multiselect("Select Days", ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"])
+        ts = st.sidebar.selectbox("Status", status_list if status_list else ["To Do"])
+        tdl = st.sidebar.date_input("Deadline")
+        t_desc = st.sidebar.text_area("Description / Instructions")
+        c1, c2 = st.sidebar.columns(2)
+        tt = c1.number_input("Total", 1, 100, 5); tc = c2.number_input("Done", 0, 100, 0)
+        t_link = st.sidebar.text_input("External Link")
+        t_file = st.sidebar.file_uploader("Attach File (Permanent Cloud)")
 
-        # Fetch Data
+        if st.sidebar.button("Add Task", type="primary"):
+            dialog_confirm_add(tn, td, ta, ts, tdl, tt, tc, freq, days_selected, t_link, t_desc, t_file)
+
         show_archived = False
         if st.session_state['role'] == "Manager": show_archived = st.sidebar.checkbox("Show Archived")
         df = get_tasks(show_archived)
         
-        # --- APP TABS ---
         st.title("📊 Lynx Task Tracker")
         tabs = ["📈 Dashboard", "👤 My Workspace"]
         if st.session_state['role'] == "Manager": tabs.append("🛠️ Admin")
         current_tab = st.tabs(tabs)
 
-        # TAB 1: DASHBOARD
         with current_tab[0]:
             dash_df = df.copy()
-            
-            # --- FIXED FILTERING LOGIC ---
             if st.session_state['role'] == "Employee":
-                # This explicitly splits the "Alice,Bob" string into a list ['Alice', 'Bob']
-                # and checks if the current user is in that list.
                 dash_df = df[df['assignee'].astype(str).apply(lambda x: st.session_state['username'] in [a.strip() for a in x.split(',')])]
 
             if not dash_df.empty:
@@ -350,15 +489,16 @@ def main():
                 st.dataframe(d_df[['task_name', 'department', 'status', 'deadline', 'completed_items']], use_container_width=True)
             else: st.info("No tasks.")
 
-        # TAB 2: WORKSPACE
         with current_tab[1]:
             st.header("Active Tasks")
-            work_df = df.copy()
+            selected_statuses = st.multiselect("Filter by Status:", options=status_list, default=status_list)
             
-            # --- FIXED FILTERING LOGIC ---
+            work_df = df.copy()
             if st.session_state['role'] == "Employee":
-                # Same robust split-and-check logic as above
-                work_df = df[df['assignee'].astype(str).apply(lambda x: st.session_state['username'] in [a.strip() for a in x.split(',')])]
+                work_df = work_df[work_df['assignee'].astype(str).apply(lambda x: st.session_state['username'] in [a.strip() for a in x.split(',')])]
+            
+            if selected_statuses: work_df = work_df[work_df['status'].isin(selected_statuses)]
+            else: work_df = work_df[0:0] 
 
             if not work_df.empty:
                 for dept in work_df['department'].unique():
@@ -372,6 +512,8 @@ def main():
                                 st.caption(f"📅 Due: {row['deadline']}")
                                 assignees = str(row['assignee']).replace(",", ", ")
                                 st.markdown(f"**👤 Assigned:** `{assignees}`")
+                                if row['description']:
+                                    with st.expander("📄 View Description/Report"): st.write(row['description'])
                                 display_attachment_preview(row['file_path'], row['task_link'])
                             with c_stat:
                                 st.write(f"**Status:** {row['status']}")
@@ -385,9 +527,8 @@ def main():
                                     if st.button("🗑️ Delete", key=f"del_{row['id']}", type="primary", use_container_width=True):
                                         dialog_confirm_delete("Task", row['task_name'], delete_task, row['id'])
                     st.write("")
-            else: st.info("No tasks.")
+            else: st.info("No tasks match your filters.")
 
-        # TAB 3: ADMIN
         if st.session_state['role'] == "Manager":
             with current_tab[2]:
                 st.header("Admin"); ac1, ac2, ac3 = st.columns(3)
