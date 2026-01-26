@@ -170,7 +170,7 @@ def process_recurring_tasks():
     #    Order: 0:id, 1:task_name, 2:department, 3:assignee, 4:frequency, 
     #           5:days_of_week, 6:next_run_date, 7:total_items, 8:description, 9:task_link
     c.execute("""
-        SELECT SERIAL PRIMARY KEY, task_name, department, assignee, frequency, 
+        SELECT id, task_name, department, assignee, frequency, 
                days_of_week, next_run_date, total_items, description, task_link 
         FROM recurring_templates 
         WHERE next_run_date <= %s
