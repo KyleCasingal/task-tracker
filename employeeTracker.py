@@ -165,23 +165,49 @@ def process_recurring_tasks():
     conn = get_db_connection()
     c = conn.cursor()
     today = date.today()
-    c.execute("SELECT * FROM recurring_templates WHERE next_run_date <= %s", (today,))
+    
+    # 1. We SELECT specific columns so we know exactly which index corresponds to what
+    #    Order: 0:id, 1:task_name, 2:department, 3:assignee, 4:frequency, 
+    #           5:days_of_week, 6:next_run_date, 7:total_items, 8:description, 9:task_link
+    c.execute("""
+        SELECT SERIAL PRIMARY KEY, task_name, department, assignee, frequency, 
+               days_of_week, next_run_date, total_items, description, task_link 
+        FROM recurring_templates 
+        WHERE next_run_date <= %s
+    """, (today,))
+    
     due_templates = c.fetchall()
     tasks_created = 0
-    colnames = [desc[0] for desc in c.description]
     
     for row in due_templates:
-        t = dict(zip(colnames, row))
+        # 2. Unpack the tuple explicitly (Safest Method)
+        t_id = row[0]
+        t_name = row[1]
+        t_dept = row[2]
+        t_assignee = row[3]
+        t_freq = row[4]
+        t_days = row[5]
+        t_next_run = row[6]
+        t_total = row[7]
+        t_desc = row[8]
+        t_link = row[9]
+        
+        # 3. Create the new task using these variables
         c.execute('''INSERT INTO tasks 
                      (task_name, department, assignee, status, deadline, total_items, completed_items, is_archived, description, task_link) 
                      VALUES (%s, %s, %s, %s, %s, %s, 0, 0, %s, %s)''', 
-                     (t['task_name'], t['department'], t['assignee'], "To Do", t['next_run_date'], t['total_items'], t.get('description', ''), t['task_link']))
-        new_date = get_next_schedule_date(t['next_run_date'], t['frequency'], t.get('days_of_week'))
-        c.execute("UPDATE recurring_templates SET next_run_date = %s WHERE id = %s", (new_date, t['id']))
+                     (t_name, t_dept, t_assignee, "To Do", t_next_run, t_total, t_desc, t_link))
+        
+        # 4. Calculate the NEW date
+        new_date = get_next_schedule_date(t_next_run, t_freq, t_days)
+
+        # 5. Update the template using the explicit 't_id'
+        c.execute("UPDATE recurring_templates SET next_run_date = %s WHERE id = %s", (new_date, t_id))
         tasks_created += 1
 
     conn.commit()
     conn.close()
+    
     if tasks_created > 0:
         get_tasks.clear()
         return tasks_created
