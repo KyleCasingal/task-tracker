@@ -151,11 +151,11 @@ def init_db():
     # Seed Data
     c.execute('SELECT count(*) FROM departments')
     if c.fetchone()[0] == 0:
-        depts = [("Engineering",), ("HR",), ("Sales",), ("Marketing",), ("Operations",)]
+        depts = [("Documentation",), ("HR",), ("Sales",), ("Marketing",), ("Operations",), ("Logstis"), ("Activation")]
         c.executemany('INSERT INTO departments VALUES (%s)', depts)
     c.execute('SELECT count(*) FROM statuses')
     if c.fetchone()[0] == 0:
-        stats = [("To Do",), ("In Progress",), ("Review",), ("Done",)]
+        stats = [("Pending",), ("In Progress",), ("Review",), ("Done",)]
         c.executemany('INSERT INTO statuses VALUES (%s)', stats)
     conn.commit()
     conn.close()
@@ -196,7 +196,7 @@ def process_recurring_tasks():
         c.execute('''INSERT INTO tasks 
                      (task_name, department, assignee, status, deadline, total_items, completed_items, is_archived, description, task_link) 
                      VALUES (%s, %s, %s, %s, %s, %s, 0, 0, %s, %s)''', 
-                     (t_name, t_dept, t_assignee, "To Do", t_next_run, t_total, t_desc, t_link))
+                     (t_name, t_dept, t_assignee, "Pending", t_next_run, t_total, t_desc, t_link))
         
         # 4. Calculate the NEW date
         new_date = get_next_schedule_date(t_next_run, t_freq, t_days)
@@ -473,7 +473,7 @@ def main():
         days_selected = []
         if freq == "Specific Days":
             days_selected = st.sidebar.multiselect("Select Days", ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"])
-        ts = st.sidebar.selectbox("Status", status_list if status_list else ["To Do"])
+        ts = st.sidebar.selectbox("Status", status_list if status_list else ["Pending"])
         tdl = st.sidebar.date_input("Deadline")
         t_desc = st.sidebar.text_area("Description / Instructions")
         c1, c2 = st.sidebar.columns(2)
