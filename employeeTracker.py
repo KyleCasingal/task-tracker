@@ -216,7 +216,7 @@ def process_recurring_tasks():
 # --- CORE FUNCTIONS ---
 def run_auto_archive():
     conn = get_db_connection(); c = conn.cursor()
-    cutoff_date = date.today() - timedelta(days=30)
+    cutoff_date = date.today() - timedelta(days=2)
     c.execute("UPDATE tasks SET is_archived = 1 WHERE status = 'Done' AND deadline < %s AND is_archived = 0", (cutoff_date,))
     count = c.rowcount; conn.commit(); conn.close()
     return count
